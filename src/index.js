@@ -356,11 +356,11 @@ async function main(linkingOverride) {
     for (let attempt = 1; attempt <= 5; attempt += 1) {
       if (connectionClosed) return;
       try {
-        console.log('Esperando a que WhatsApp abra la conexión segura…');
-        await sock.waitForSocketOpen();
-        if (connectionClosed) return;
         const code = await sock.requestPairingCode(linking.phoneNumber);
-        console.log(`\nTu pairing code es: ${code}\nEn WhatsApp: Dispositivos vinculados > Vincular dispositivo > Vincular con número de teléfono.`);
+        if (!/^[A-Z0-9]{8}$/.test(code)) {
+          throw new Error(`Baileys devolvió un código inesperado (${String(code)}).`);
+        }
+        console.log(`\nTu pairing code es: ${code}\nEn WhatsApp: Dispositivos vinculados > Vincular dispositivo > Vincular con número de teléfono. Escríbelo exactamente, sin espacios ni guiones, y úsalo enseguida.`);
         return;
       } catch (error) {
         if (connectionClosed) return;
@@ -378,18 +378,26 @@ async function main(linkingOverride) {
     if (qr && linking.method === 'qr') {
       console.log('\nEscanea el QR con WhatsApp > Dispositivos vinculados > Vincular dispositivo.');
     }
-    // Baileys emits the QR update after the pairing handshake is ready.
-    if (qr && linking.method === 'pairing-code') {
-      void requestPairingCode();
-    }
     if (connection === 'open') console.log('WhatsApp conectado. Envía .help para ver los comandos.');
     if (connection === 'close') {
       connectionClosed = true;
       const code = lastDisconnect?.error?.output?.statusCode;
-      if (code !== DisconnectReason.loggedOut) main(linking).catch(console.error);
-      else console.log(`Sesión cerrada. Borra ${AUTH_DIR} para vincular de nuevo.`);
+      if (code === DisconnectReason.loggedOut) {
+        console.log(`WhatsApp indica que esta sesión ya no está vinculada. Eliminando credenciales de ${AUTH_DIR} y reiniciando el vínculo…`);
+        void (async () => {
+          await rm(AUTH_DIR, { recursive: true, force: true });
+          await mkdir(AUTH_DIR, { recursive: true });
+          await main();
+        })().catch(console.error);
+      } else {
+        main(linking).catch(console.error);
+      }
     }
   });
+  // Baileys recommends requesting the code immediately after creating the socket.
+  if (linking.method === 'pairing-code' && !state.creds.registered) {
+    void requestPairingCode();
+  }
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
     for (const message of messages) {
