@@ -1,0 +1,12 @@
+#!/bin/sh
+# Shim de ffmpeg para pruebas: produce archivos de salida mínimos válidos
+# (suficientes para recorrer el código del bot sin un ffmpeg real).
+out=""
+for a; do out="$a"; done
+case "$out" in
+  *.webp) cp /home/user/Sticker/test/fixtures/tiny.webp "$out" ;;
+  *.png)  cp /home/user/Sticker/test/fixtures/tiny.png  "$out" ;;
+  *.mp4)  cp /home/user/Sticker/test/fixtures/tiny.mp4  "$out" ;;
+  *)      : > "$out" ;;
+esac
+exit 0

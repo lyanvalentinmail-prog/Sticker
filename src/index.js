@@ -16,6 +16,7 @@ import { promisify } from 'node:util';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { pathToFileURL } from 'node:url';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 
@@ -68,10 +69,9 @@ const getContent = (message) => {
 
 const getContextInfo = (message) => {
   const content = messageContent(message);
-  for (const value of Object.values(content)) {
-    if (value && typeof value === 'object' && value.contextInfo) return value.contextInfo;
-  }
-  return undefined;
+  // `contextInfo` va al mismo nivel que el tipo de medio (imageMessage, videoMessage, ...),
+  // no dentro de cada valor del contenido.
+  return content?.contextInfo;
 };
 
 async function mediaFrom(message, quoted = false) {
@@ -741,7 +741,32 @@ process.once('SIGINT', () => {
   process.exit(0);
 });
 
-main().catch((error) => {
-  console.error('No se pudo iniciar el bot:', error.message || error);
-  process.exit(1);
-});
+const isEntryPoint = import.meta.url === pathToFileURL(process.argv[1] || '').href;
+if (isEntryPoint) {
+  main().catch((error) => {
+    console.error('No se pudo iniciar el bot:', error.message || error);
+    process.exit(1);
+  });
+}
+
+export {
+  addPackMetadata,
+  addToPack,
+  chooseLinkingMethod,
+  downloadWebp,
+  getContent,
+  getContextInfo,
+  getIncomingMedia,
+  getIncomingMediaFromQuote,
+  getMessageText,
+  handleCommand,
+  isValidPhoneNumber,
+  mediaFrom,
+  main,
+  normalizePhoneNumber,
+  packSessions,
+  react,
+  sendSticker,
+  toSticker,
+  tenorSearch,
+};
