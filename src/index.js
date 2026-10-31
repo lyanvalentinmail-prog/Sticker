@@ -5,6 +5,7 @@ import makeWASocket, {
   useMultiFileAuthState,
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
+import qrcode from 'qrcode-terminal';
 import WebP from 'node-webpmux';
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
@@ -307,11 +308,11 @@ async function chooseLinkingMethod(isRegistered) {
   try {
     while (true) {
       console.log('\n¿Cómo quieres vincular WhatsApp?');
-      console.log('  1) QR');
-      console.log('  2) Pairing code (vincular con número de teléfono)');
-      const choice = (await prompt.question('Selecciona 1 o 2: ')).trim();
-      if (choice === '1') return { method: 'qr' };
-      if (choice === '2') {
+      console.log('  qr   — vincular escaneando un código QR');
+      console.log('  code — vincular con un código de 8 caracteres');
+      const choice = (await prompt.question('Escribe qr o code: ')).trim().toLowerCase();
+      if (choice === 'qr' || choice === '1') return { method: 'qr' };
+      if (choice === 'code' || choice === '2') {
         while (true) {
           const rawNumber = await prompt.question('Número con código de país (solo dígitos, ej. 59899123456): ');
           const phoneNumber = normalizePhoneNumber(rawNumber);
@@ -319,7 +320,7 @@ async function chooseLinkingMethod(isRegistered) {
           console.log('Número no válido. Usa de 8 a 15 dígitos, incluye el código de país y no pongas 00 al inicio.');
         }
       }
-      console.log('Opción no válida; escribe 1 para QR o 2 para pairing code.');
+      console.log('Opción no válida; escribe qr o code.');
     }
   } finally {
     prompt.close();
@@ -343,7 +344,7 @@ async function main(linkingOverride) {
     auth: state,
     logger,
     browser: Browsers.ubuntu('Sticker Bot'),
-    printQRInTerminal: linking.method === 'qr',
+    printQRInTerminal: false,
     markOnlineOnConnect: false,
     syncFullHistory: false,
   });
@@ -356,11 +357,14 @@ async function main(linkingOverride) {
     for (let attempt = 1; attempt <= 5; attempt += 1) {
       if (connectionClosed) return;
       try {
+        if (!sock.ws?.isOpen) await sock.waitForSocketOpen();
+        if (!sock.ws?.isOpen) throw new Error('El WebSocket todavía no está abierto.');
         const code = await sock.requestPairingCode(linking.phoneNumber);
         if (!/^[A-Z0-9]{8}$/.test(code)) {
           throw new Error(`Baileys devolvió un código inesperado (${String(code)}).`);
         }
-        console.log(`\nTu pairing code es: ${code}\nEn WhatsApp: Dispositivos vinculados > Vincular dispositivo > Vincular con número de teléfono. Escríbelo exactamente, sin espacios ni guiones, y úsalo enseguida.`);
+        const formattedCode = `${code.slice(0, 4)}-${code.slice(4)}`;
+        console.log(`\nTu pairing code es: ${formattedCode}\nEn WhatsApp: Dispositivos vinculados > Vincular dispositivo > Vincular con número de teléfono. Escríbelo enseguida tal como aparece.`);
         return;
       } catch (error) {
         if (connectionClosed) return;
@@ -377,6 +381,7 @@ async function main(linkingOverride) {
   sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
     if (qr && linking.method === 'qr') {
       console.log('\nEscanea el QR con WhatsApp > Dispositivos vinculados > Vincular dispositivo.');
+      qrcode.generate(qr, { small: true });
     }
     if (connection === 'open') console.log('WhatsApp conectado. Envía .help para ver los comandos.');
     if (connection === 'close') {

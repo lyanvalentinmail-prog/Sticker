@@ -10,6 +10,8 @@ Bot de WhatsApp en Node.js para crear y administrar stickers. Se vincula mediant
 pkg update -y
 pkg install -y nodejs-lts ffmpeg
 cd ~/Sticker
+# Elimina una configuración inválida anterior (el lockfile ya usa dependencias de npm, no Git)
+npm config delete allow-git
 npm install
 ```
 
@@ -21,12 +23,12 @@ Copia el proyecto al teléfono o clónalo en `~/Sticker`. Inicia con `npm start`
 npm start
 ```
 
-En la primera ejecución, el bot pregunta qué método usar:
+En la primera ejecución, el bot pregunta `qr` o `code` (también acepta `1` o `2`):
 
-1. **QR**: escanea el código desde WhatsApp > Dispositivos vinculados > Vincular dispositivo.
-2. **Pairing code**: escribe el número completo con código de país, solo dígitos (por ejemplo, `59899123456`). Espera a que Termux muestre el código y escríbelo en WhatsApp > Dispositivos vinculados > Vincular dispositivo > Vincular con número de teléfono.
+- **qr**: muestra un QR en la terminal. Escanéalo desde WhatsApp > Dispositivos vinculados > Vincular dispositivo.
+- **code**: escribe el número completo con código de país, solo dígitos (por ejemplo, `59899123456`). El bot espera a que el WebSocket esté abierto, pide el pairing code como en Pain-Bot y lo muestra agrupado `ABCD-EFGH`. Introduce el código recién generado desde WhatsApp > Dispositivos vinculados > Vincular dispositivo > Vincular con número de teléfono.
 
-La sesión queda guardada en `auth_info/`; si ya está vinculada, `npm start` se conecta directamente sin volver a preguntar. El bot solicita el pairing code siguiendo el flujo recomendado por Baileys y muestra los 8 caracteres sin formato adicional. Escríbelos enseguida en WhatsApp, exactamente como aparecen y sin añadir espacios ni guiones. En una terminal no interactiva puedes omitir el menú y usar `PAIRING_NUMBER=59899123456 npm start`, sustituyendo el ejemplo por tu número real. Si el bot detecta credenciales incompletas y no vinculadas (`registered=false`), borra automáticamente esos archivos y vuelve a iniciar el flujo. Si WhatsApp revoca la sesión (`loggedOut`), también elimina las credenciales y reinicia el vínculo. Las sesiones vinculadas y vigentes no se borran. Si vas a cambiar una cuenta ya vinculada, desconéctala en WhatsApp y elimina `auth_info/`.
+La sesión queda guardada en `auth_info/`; si ya está vinculada, `npm start` se conecta directamente sin volver a preguntar. No escanees el QR si elegiste `code` y no reutilices códigos anteriores. En una terminal no interactiva puedes omitir el menú con `PAIRING_NUMBER=59899123456 npm start`, sustituyendo el ejemplo por tu número real. Si el bot detecta credenciales incompletas y no vinculadas (`registered=false`), borra automáticamente esos archivos y vuelve a iniciar el flujo. Si WhatsApp revoca la sesión (`loggedOut`), también elimina las credenciales y reinicia el vínculo. Las sesiones vinculadas y vigentes no se borran. Si vas a cambiar una cuenta ya vinculada, desconéctala en WhatsApp y elimina `auth_info/`.
 
 ## Comandos
 
