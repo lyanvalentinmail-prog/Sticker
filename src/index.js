@@ -12,6 +12,8 @@ import { promisify } from 'node:util';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { createInterface } from 'node:readline/promises';
+import { stdin, stdout } from 'node:process';
 
 const execFileAsync = promisify(execFile);
 const AUTH_DIR = process.env.AUTH_DIR || './auth_info';
@@ -281,41 +283,103 @@ async function getIncomingMediaFromQuote(message) {
   }
 }
 
-async function main() {
+function normalizePhoneNumber(value) {
+  return String(value || '').replace(/\D/g, '');
+}
+
+async function chooseLinkingMethod(isRegistered) {
+  if (isRegistered) return { method: 'saved-session' };
+
+  const envNumber = normalizePhoneNumber(process.env.PAIRING_NUMBER);
+  if (envNumber) {
+    if (!/^[1-9]\d{7,14}$/.test(envNumber)) {
+      throw new Error('PAIRING_NUMBER debe incluir código de país y tener entre 8 y 15 dígitos.');
+    }
+    return { method: 'pairing-code', phoneNumber: envNumber };
+  }
+
+  if (!stdin.isTTY || !stdout.isTTY) {
+    console.log('No hay terminal interactiva; se usará QR. Para pairing code ejecuta PAIRING_NUMBER=598XXXXXXXX npm start.');
+    return { method: 'qr' };
+  }
+
+  const prompt = createInterface({ input: stdin, output: stdout });
+  try {
+    while (true) {
+      console.log('\n¿Cómo quieres vincular WhatsApp?');
+      console.log('  1) QR');
+      console.log('  2) Pairing code (vincular con número de teléfono)');
+      const choice = (await prompt.question('Selecciona 1 o 2: ')).trim();
+      if (choice === '1') return { method: 'qr' };
+      if (choice === '2') {
+        while (true) {
+          const rawNumber = await prompt.question('Número con código de país (solo dígitos, ej. 59899123456): ');
+          const phoneNumber = normalizePhoneNumber(rawNumber);
+          if (/^[1-9]\d{7,14}$/.test(phoneNumber)) return { method: 'pairing-code', phoneNumber };
+          console.log('Número no válido. Usa de 8 a 15 dígitos, incluye el código de país y no pongas 00 al inicio.');
+        }
+      }
+      console.log('Opción no válida; escribe 1 para QR o 2 para pairing code.');
+    }
+  } finally {
+    prompt.close();
+  }
+}
+
+async function main(linkingOverride) {
   await mkdir(AUTH_DIR, { recursive: true });
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+  const linking = linkingOverride || await chooseLinkingMethod(state.creds.registered);
   const sock = makeWASocket({
     auth: state,
     logger,
     browser: Browsers.ubuntu('Sticker Bot'),
-    printQRInTerminal: true,
+    printQRInTerminal: linking.method === 'qr',
     markOnlineOnConnect: false,
     syncFullHistory: false,
   });
   sock.ev.on('creds.update', saveCreds);
   let pairingCodeRequested = false;
-  sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
-    if (qr) console.log('\nEscanea el QR con WhatsApp > Dispositivos vinculados > Vincular dispositivo.');
-    const phoneNumber = process.env.PAIRING_NUMBER?.replace(/\D/g, '');
-    if (phoneNumber && !state.creds.registered && !pairingCodeRequested && connection === 'connecting') {
-      pairingCodeRequested = true;
-      setTimeout(async () => {
-        try {
-          const code = await sock.requestPairingCode(phoneNumber);
-          console.log(`\nCódigo de vinculación: ${code}\nIngresa el código en WhatsApp > Dispositivos vinculados > Vincular dispositivo con número de teléfono.`);
-        } catch (error) {
-          pairingCodeRequested = false;
-          console.error('No se pudo generar el código de vinculación:', error.message);
+  let connectionClosed = false;
+  const requestPairingCode = async () => {
+    if (pairingCodeRequested || linking.method !== 'pairing-code' || state.creds.registered) return;
+    pairingCodeRequested = true;
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, attempt === 1 ? 3000 : 2000));
+      if (connectionClosed) return;
+      try {
+        const code = await sock.requestPairingCode(linking.phoneNumber);
+        console.log(`\nCódigo de vinculación: ${code}\nEn WhatsApp: Dispositivos vinculados > Vincular dispositivo > Vincular con número de teléfono.`);
+        return;
+      } catch (error) {
+        if (attempt === 5) {
+          console.error(`No se pudo generar el pairing code: ${error.message}`);
+          console.error('Comprueba el número con código de país y la conexión. Cierra y vuelve a ejecutar npm start para intentarlo otra vez.');
+        } else {
+          console.log(`Esperando conexión para pedir el código… (${attempt}/5)`);
         }
-      }, 3000);
+      }
+    }
+  };
+  sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
+    if (qr && linking.method === 'qr') {
+      console.log('\nEscanea el QR con WhatsApp > Dispositivos vinculados > Vincular dispositivo.');
+    }
+    if (connection === 'connecting' && linking.method === 'pairing-code') {
+      void requestPairingCode();
     }
     if (connection === 'open') console.log('WhatsApp conectado. Envía .help para ver los comandos.');
     if (connection === 'close') {
+      connectionClosed = true;
       const code = lastDisconnect?.error?.output?.statusCode;
-      if (code !== DisconnectReason.loggedOut) main().catch(console.error);
+      if (code !== DisconnectReason.loggedOut) main(linking).catch(console.error);
       else console.log(`Sesión cerrada. Borra ${AUTH_DIR} para vincular de nuevo.`);
     }
   });
+  if (linking.method === 'pairing-code' && !state.creds.registered) {
+    // Also schedule a fallback in case the initial "connecting" event fired before listeners attached.
+    void requestPairingCode();
+  }
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
     for (const message of messages) {

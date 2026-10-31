@@ -15,23 +15,18 @@ npm install
 
 Copia el proyecto al teléfono o clónalo en `~/Sticker`. Inicia con `npm start`.
 
-### Vinculación por QR
+### Vinculación por QR o pairing code
 
 ```sh
 npm start
 ```
 
-Escanea el QR desde WhatsApp: **Ajustes > Dispositivos vinculados > Vincular dispositivo**. La sesión queda en `auth_info/`; las próximas ejecuciones reutilizan el vínculo.
+En la primera ejecución, el bot pregunta qué método usar:
 
-### Vinculación por código
+1. **QR**: escanea el código desde WhatsApp > Dispositivos vinculados > Vincular dispositivo.
+2. **Pairing code**: escribe el número completo con código de país, solo dígitos (por ejemplo, `59899123456`). Espera a que Termux muestre el código y escríbelo en WhatsApp > Dispositivos vinculados > Vincular dispositivo > Vincular con número de teléfono.
 
-Indica el número de WhatsApp que vas a vincular con código internacional, sin `+`, espacios ni guiones:
-
-```sh
-PAIRING_NUMBER=598XXXXXXXX npm start
-```
-
-Sigue la ruta **WhatsApp > Dispositivos vinculados > Vincular dispositivo con número de teléfono** e introduce el código que muestra Termux. Si la sesión anterior está vinculada, primero cierra esa sesión desde WhatsApp.
+La sesión queda guardada en `auth_info/`; si ya está vinculada, `npm start` se conecta directamente sin volver a preguntar. En una terminal no interactiva puedes omitir el menú y usar `PAIRING_NUMBER=59899123456 npm start`, sustituyendo el ejemplo por tu número real. Si vas a cambiar de método o cuenta, primero desconecta la sesión existente en WhatsApp y elimina `auth_info/`.
 
 ## Comandos
 
@@ -61,7 +56,7 @@ npm start
 Si usas pairing junto con búsqueda:
 
 ```sh
-TENOR_API_KEY='tu_clave' PAIRING_NUMBER=598XXXXXXXX npm start
+TENOR_API_KEY='tu_clave' PAIRING_NUMBER=59899123456 npm start
 ```
 
 Sin la clave, las demás funciones (crear, convertir y enviar stickers) siguen disponibles.
