@@ -1,8 +1,10 @@
 import makeWASocket, {
   Browsers,
   DisconnectReason,
-  fetchLatestBaileysVersion,
   downloadMediaMessage,
+  extractMessageContent,
+  fetchLatestBaileysVersion,
+  getContentType,
   useMultiFileAuthState,
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
@@ -23,58 +25,91 @@ const TENOR_KEY = process.env.TENOR_API_KEY;
 const logger = pino({ level: process.env.LOG_LEVEL || 'silent' });
 const packSessions = new Map();
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
+const MAX_PACK_ITEMS = 30;
+
+// Reacciones del bot: primero "espera", luego "listo".
+const REACTION_WAITING = '🕘';
+const REACTION_DONE = '⭐️';
 
 const help = `*Sticker Bot — comandos*
 .pack nombre.autor  Inicia un paquete
-.pack add            Activa la captura de imágenes
+.pack add            Activa la captura de imágenes y videos
 .pack done           Envía los stickers reunidos
 .pack cancel         Cancela el paquete
-.sticker             Responde a una imagen o sticker para convertirlo
+.sticker             Responde a una imagen, video o sticker para convertirlo
+.sticker texto       Busca un sticker en Tenor y lo envía
 .toimg               Responde a un sticker para convertirlo a imagen
 .tovid               Responde a un sticker animado para convertirlo a video
 .ssearch texto       Busca stickers en Tenor
 .spack texto         Busca stickers y envía hasta 8 como paquete
-.help                Muestra esta ayuda
+.help / .menu        Muestra esta ayuda
 
-En un paquete, activa primero .pack add y luego envía las imágenes. También puedes responder a una imagen con .pack add.`;
+En un paquete, activa primero .pack add y luego envía las imágenes. También puedes responder a una imagen con .pack add.
+
+El bot reacciona 🕘 mientras procesa cada comando y ⭐️ cuando termina.`;
+
+const MEDIA_TYPES = ['imageMessage', 'stickerMessage', 'videoMessage'];
+
+const messageContent = (message) => extractMessageContent(message?.message) || {};
 
 const getMessageText = (message) => {
-  const m = message.message;
-  return m?.conversation || m?.extendedTextMessage?.text ||
-    m?.imageMessage?.caption || m?.videoMessage?.caption || '';
+  const content = messageContent(message);
+  return content.conversation || content.extendedTextMessage?.text ||
+    content.imageMessage?.caption || content.videoMessage?.caption ||
+    content.documentMessage?.caption || '';
 };
+
 const getContent = (message) => {
-  const m = message.message;
-  const type = Object.keys(m || {}).find((key) => ['imageMessage', 'stickerMessage', 'videoMessage'].includes(key));
-  return type ? { type, content: m[type] } : null;
+  const content = messageContent(message);
+  const type = getContentType(content);
+  if (!MEDIA_TYPES.includes(type)) return null;
+  return { type, content: content[type] };
 };
-const getQuotedMessage = (message) => message.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+
+const getContextInfo = (message) => {
+  const content = messageContent(message);
+  for (const value of Object.values(content)) {
+    if (value && typeof value === 'object' && value.contextInfo) return value.contextInfo;
+  }
+  return undefined;
+};
 
 async function mediaFrom(message, quoted = false) {
   let target = message;
   if (quoted) {
-    const quotedMessage = getQuotedMessage(message);
-    if (!quotedMessage) return null;
-    const context = message.message?.extendedTextMessage?.contextInfo;
+    const context = getContextInfo(message);
+    if (!context?.quotedMessage) return null;
     target = {
       key: {
         remoteJid: message.key.remoteJid,
-        id: context?.stanzaId,
-        participant: context?.participant,
+        id: context.stanzaId,
+        participant: context.participant,
         fromMe: false,
       },
-      message: quotedMessage,
+      message: context.quotedMessage,
     };
   }
   const media = getContent(target);
-  if (!media || !['imageMessage', 'stickerMessage', 'videoMessage'].includes(media.type)) return null;
+  if (!media) return null;
   const buffer = await downloadMediaMessage(target, 'buffer', {}, {
     logger,
-    reuploadRequest: async () => undefined,
+    reuploadRequest: async (quotedMessage) => quotedMessage,
   });
-  if (!Buffer.isBuffer(buffer) || buffer.length > MAX_FILE_BYTES) throw new Error('El archivo es demasiado grande (máximo 20 MB).');
+  if (!Buffer.isBuffer(buffer) || buffer.length > MAX_FILE_BYTES) {
+    throw new Error('El archivo es demasiado grande (máximo 20 MB).');
+  }
   return { ...media, buffer };
 }
+
+const ffmpegError = (error) => {
+  if (error?.code === 'ENOENT') {
+    return new Error('No encuentro ffmpeg. Instálalo en Termux con: pkg install ffmpeg');
+  }
+  const detail = String(error?.stderr || '').trim().split('\n').filter(Boolean).pop();
+  return new Error(detail
+    ? `ffmpeg no pudo procesar el archivo (${detail}).`
+    : 'ffmpeg no pudo procesar el archivo. Verifica que el formato sea compatible.');
+};
 
 async function ffmpegConvert(buffer, outputName, makeArgs) {
   const workDir = await mkdtemp(path.join(os.tmpdir(), 'wa-sticker-'));
@@ -82,8 +117,13 @@ async function ffmpegConvert(buffer, outputName, makeArgs) {
     const input = path.join(workDir, 'input');
     const output = path.join(workDir, outputName);
     await writeFile(input, buffer);
-    await execFileAsync('ffmpeg', makeArgs(input, output), { timeout: 60000 });
+    await execFileAsync('ffmpeg', ['-hide_banner', '-loglevel', 'error', ...makeArgs(input, output)], {
+      timeout: 60000,
+      maxBuffer: 4 * 1024 * 1024,
+    });
     return await readFile(output);
+  } catch (error) {
+    throw ffmpegError(error);
   } finally {
     await rm(workDir, { recursive: true, force: true });
   }
@@ -102,8 +142,19 @@ async function toSticker(buffer) {
 }
 
 async function getIncomingMedia(message) {
-  try { return await mediaFrom(message); } catch (error) {
+  try {
+    return await mediaFrom(message);
+  } catch (error) {
     console.error('No se pudo descargar el medio:', error.message);
+    return null;
+  }
+}
+
+async function getIncomingMediaFromQuote(message) {
+  try {
+    return await mediaFrom(message, true);
+  } catch (error) {
+    console.error('No se pudo descargar el medio citado:', error.message);
     return null;
   }
 }
@@ -167,29 +218,67 @@ async function reply(sock, jid, text, quoted) {
   await sock.sendMessage(jid, { text }, { quoted });
 }
 
+async function react(sock, message, emoji) {
+  if (!emoji || !message?.key?.remoteJid) return;
+  try {
+    await sock.sendMessage(message.key.remoteJid, { react: { text: emoji, key: message.key } });
+  } catch (error) {
+    console.error('No se pudo reaccionar al mensaje:', error.message);
+  }
+}
+
+function addToPack(session, media) {
+  if (session.items.length >= MAX_PACK_ITEMS) {
+    return `El paquete ya tiene ${MAX_PACK_ITEMS} stickers. Usa .pack done para enviarlos.`;
+  }
+  session.items.push(media.buffer);
+  return null;
+}
+
 async function handleCommand(sock, message, command, args, key, jid) {
   const session = packSessions.get(key);
 
-  if (command === '.help' || command === '.menu') return reply(sock, jid, help, message);
+  if (command === '.help' || command === '.menu') {
+    await reply(sock, jid, help, message);
+    return;
+  }
 
   if (command === '.pack') {
-    const action = args[0]?.toLowerCase();
+    const action = (args[0] || '').toLowerCase();
+
     if (action === 'add') {
-      if (!session) return reply(sock, jid, 'Primero crea un paquete: .pack nombre.autor', message);
+      if (!session) {
+        await reply(sock, jid, 'Primero crea un paquete: .pack nombre.autor', message);
+        return;
+      }
       session.capturing = true;
       const quoted = await getIncomingMediaFromQuote(message);
       if (quoted) {
-        session.items.push(quoted.buffer);
-        return reply(sock, jid, `Sticker agregado (${session.items.length}). Envía más imágenes o usa .pack done.`, message);
+        const warning = addToPack(session, quoted);
+        if (warning) {
+          await reply(sock, jid, warning, message);
+          return;
+        }
+        await reply(sock, jid, `Sticker agregado (${session.items.length}). Envía más imágenes o usa .pack done.`, message);
+        return;
       }
-      return reply(sock, jid, 'Modo de captura activado. Ahora envía las imágenes que quieras agregar; termina con .pack done.', message);
+      await reply(sock, jid, 'Modo de captura activado. Ahora envía las imágenes o videos que quieras agregar; termina con .pack done.', message);
+      return;
     }
+
     if (action === 'done') {
-      if (!session) return reply(sock, jid, 'No tienes un paquete en curso.', message);
-      if (!session.items.length) return reply(sock, jid, 'El paquete está vacío. Envía imágenes después de .pack add.', message);
+      if (!session) {
+        await reply(sock, jid, 'No tienes un paquete en curso.', message);
+        return;
+      }
+      if (!session.items.length) {
+        await reply(sock, jid, 'El paquete está vacío. Envía imágenes después de .pack add.', message);
+        return;
+      }
       packSessions.delete(key);
       await reply(sock, jid, `Enviando *${session.name}* — ${session.author} (${session.items.length} stickers)…`, message);
       let sent = 0;
+      let firstError = null;
       for (const item of session.items) {
         try {
           await sendSticker(sock, jid, await toSticker(item), {
@@ -198,93 +287,121 @@ async function handleCommand(sock, message, command, args, key, jid) {
             author: session.author,
           });
           sent += 1;
-        } catch (error) { console.error('Error preparando sticker:', error.message); }
+        } catch (error) {
+          firstError = firstError || error;
+          console.error('Error preparando sticker:', error.message);
+        }
       }
-      if (sent < session.items.length) {
-        await reply(sock, jid, `Se enviaron ${sent} de ${session.items.length}. Verifica que ffmpeg esté instalado y que las imágenes sean válidas.`, message);
+      if (sent === session.items.length) {
+        await reply(sock, jid, `Paquete *${session.name}* enviado (${sent} ${sent === 1 ? 'sticker' : 'stickers'}).`, message);
+      } else {
+        await reply(sock, jid, `Se enviaron ${sent} de ${session.items.length}. ${firstError?.message || 'Revisa que las imágenes sean válidas.'}`, message);
       }
       return;
     }
+
     if (action === 'cancel') {
-      if (!session) return reply(sock, jid, 'No tienes un paquete en curso.', message);
+      if (!session) {
+        await reply(sock, jid, 'No tienes un paquete en curso.', message);
+        return;
+      }
       packSessions.delete(key);
-      return reply(sock, jid, 'Paquete cancelado.', message);
+      await reply(sock, jid, 'Paquete cancelado.', message);
+      return;
     }
+
     const label = args.join(' ').trim();
     const splitAt = label.lastIndexOf('.');
     if (!label || splitAt < 1 || splitAt === label.length - 1) {
-      return reply(sock, jid, 'Formato: .pack nombre.autor (usa un punto para separar el nombre del autor).', message);
+      await reply(sock, jid, 'Formato: .pack nombre.autor (usa un punto para separar el nombre del autor).', message);
+      return;
     }
     const name = label.slice(0, splitAt).trim();
     const author = label.slice(splitAt + 1).trim();
     packSessions.set(key, { id: randomUUID(), name, author, items: [], capturing: false });
-    return reply(sock, jid, `Paquete *${name}* de *${author}* creado. Usa .pack add y envía tus imágenes.`, message);
+    await reply(sock, jid, `Paquete *${name}* de *${author}* creado. Usa .pack add y envía tus imágenes.`, message);
+    return;
   }
 
   if (command === '.sticker') {
     if (args.length) {
       const results = await tenorSearch(args.join(' '), 1);
-      if (!results.length) return reply(sock, jid, 'No encontré stickers con esa búsqueda.', message);
-      return sendSticker(sock, jid, await toSticker(await downloadWebp(results[0].url)));
+      if (!results.length) {
+        await reply(sock, jid, 'No encontré stickers con esa búsqueda.', message);
+        return;
+      }
+      await sendSticker(sock, jid, await toSticker(await downloadWebp(results[0].url)));
+      return;
     }
     const media = await getIncomingMedia(message) || await getIncomingMediaFromQuote(message);
-    if (!media) return reply(sock, jid, 'Envía una imagen con .sticker en el texto o responde a una imagen con .sticker.', message);
-    return sendSticker(sock, jid, await toSticker(media.buffer));
+    if (!media) {
+      await reply(sock, jid, 'Envía una imagen con .sticker en el texto o responde a una imagen, video o sticker con .sticker.', message);
+      return;
+    }
+    await sendSticker(sock, jid, await toSticker(media.buffer));
+    return;
   }
 
   if (command === '.toimg') {
     const media = await getIncomingMedia(message) || await getIncomingMediaFromQuote(message);
-    if (!media || media.type !== 'stickerMessage') return reply(sock, jid, 'Responde a un sticker con .toimg.', message);
-    try {
-      const png = await ffmpegConvert(media.buffer, 'image.png', (input, output) => [
-        '-y', '-i', input, '-frames:v', '1', output,
-      ]);
-      return sock.sendMessage(jid, { image: png, caption: 'Sticker convertido a imagen.' }, { quoted: message });
-    } catch (error) {
-      if (error.code === 'ENOENT') return reply(sock, jid, 'No encuentro ffmpeg. Instálalo en Termux con: pkg install ffmpeg', message);
-      throw error;
+    if (!media || media.type !== 'stickerMessage') {
+      await reply(sock, jid, 'Responde a un sticker con .toimg.', message);
+      return;
     }
+    const png = await ffmpegConvert(media.buffer, 'image.png', (input, output) => [
+      '-y', '-i', input, '-frames:v', '1', output,
+    ]);
+    await sock.sendMessage(jid, { image: png, caption: 'Sticker convertido a imagen.' }, { quoted: message });
+    return;
   }
 
   if (command === '.tovid') {
     const media = await getIncomingMedia(message) || await getIncomingMediaFromQuote(message);
-    if (!media || media.type !== 'stickerMessage') return reply(sock, jid, 'Responde a un sticker animado con .tovid.', message);
-    try {
-      const video = await ffmpegConvert(media.buffer, 'output.mp4', (input, output) => [
-        '-y', '-i', input,
-        '-vf', 'scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=white,fps=15',
-        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-an', output,
-      ]);
-      await sock.sendMessage(jid, { video, mimetype: 'video/mp4', caption: 'Sticker animado convertido a video.', gifPlayback: true }, { quoted: message });
-    } catch (error) {
-      if (error.code === 'ENOENT') return reply(sock, jid, 'No encuentro ffmpeg. Instálalo en Termux con: pkg install ffmpeg', message);
-      return reply(sock, jid, 'No pude convertirlo. .tovid funciona con stickers animados; verifica que ffmpeg esté instalado.');
+    if (!media || media.type !== 'stickerMessage') {
+      await reply(sock, jid, 'Responde a un sticker animado con .tovid.', message);
+      return;
     }
+    const video = await ffmpegConvert(media.buffer, 'output.mp4', (input, output) => [
+      '-y', '-i', input,
+      '-vf', 'scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=white,fps=15',
+      '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-an', output,
+    ]);
+    await sock.sendMessage(jid, { video, mimetype: 'video/mp4', caption: 'Sticker animado convertido a video.', gifPlayback: true }, { quoted: message });
     return;
   }
 
   if (command === '.ssearch' || command === '.spack') {
-    if (!args.length) return reply(sock, jid, `Uso: ${command} texto de búsqueda`, message);
-    const results = await tenorSearch(args.join(' '), command === '.spack' ? 8 : 1);
-    if (!results.length) return reply(sock, jid, 'No encontré resultados. Prueba con otras palabras.', message);
-    if (command === '.ssearch') return sendSticker(sock, jid, await toSticker(await downloadWebp(results[0].url)));
-    await reply(sock, jid, `Encontré ${results.length} stickers para *${args.join(' ')}*. Enviando…`, message);
-    const resultPack = { id: randomUUID(), name: args.join(' '), author: 'Tenor' };
+    if (!args.length) {
+      await reply(sock, jid, `Uso: ${command} texto de búsqueda`, message);
+      return;
+    }
+    const query = args.join(' ');
+    const results = await tenorSearch(query, command === '.spack' ? 8 : 1);
+    if (!results.length) {
+      await reply(sock, jid, 'No encontré resultados. Prueba con otras palabras.', message);
+      return;
+    }
+    if (command === '.ssearch') {
+      await sendSticker(sock, jid, await toSticker(await downloadWebp(results[0].url)));
+      return;
+    }
+    await reply(sock, jid, `Encontré ${results.length} stickers para *${query}*. Enviando…`, message);
+    const resultPack = { id: randomUUID(), name: query, author: 'Tenor' };
+    let sent = 0;
     for (const result of results) {
       try {
         await sendSticker(sock, jid, await toSticker(await downloadWebp(result.url)), resultPack);
-      } catch (error) { console.error('No se pudo enviar resultado:', error.message); }
+        sent += 1;
+      } catch (error) {
+        console.error('No se pudo enviar resultado:', error.message);
+      }
     }
+    if (!sent) {
+      await reply(sock, jid, 'No pude enviar los stickers encontrados. Inténtalo de nuevo en un momento.', message);
+    }
+    return;
   }
 }
-
-async function getIncomingMediaFromQuote(message) {
-  try { return await mediaFrom(message, true); } catch (error) {
-    console.error('No se pudo descargar el medio citado:', error.message);
-    return null;
-  }
-}
-
 function normalizePhoneNumber(value) {
   return String(value || '').replace(/\D/g, '').replace(/^0+/, '');
 }
@@ -564,10 +681,60 @@ async function main({ linking: initialLinking, version: versionOverride } = {}) 
         void handleClose(lastDisconnect, pairingAttempted);
       }
     });
+
+    sock.ev.on('messages.upsert', async ({ messages, type }) => {
+      if (type !== 'notify' || !Array.isArray(messages)) return;
+
+      for (const message of messages) {
+        const jid = message?.key?.remoteJid;
+        if (!message?.message || message.key?.fromMe || !jid || jid === 'status@broadcast') continue;
+
+        const sender = message.key.participant || jid;
+        const key = `${jid}:${sender}`;
+        const text = getMessageText(message).trim();
+        const match = text.match(/^\.(pack|sticker|toimg|tovid|ssearch|spack|help|menu)\b\s*([\s\S]*)$/i);
+        const session = packSessions.get(key);
+
+        if (match) {
+          const command = `.${match[1].toLowerCase()}`;
+          const args = match[2].trim().split(/\s+/).filter(Boolean);
+          await react(sock, message, REACTION_WAITING);
+          try {
+            await handleCommand(sock, message, command, args, key, jid);
+          } catch (error) {
+            console.error('Error procesando el comando:', error);
+            await reply(sock, jid, `No pude completar el comando: ${error.message || 'error inesperado'}`, message);
+          } finally {
+            await react(sock, message, REACTION_DONE);
+          }
+          continue;
+        }
+
+        if (session?.capturing) {
+          try {
+            const media = await getIncomingMedia(message);
+            if (!media) continue;
+            await react(sock, message, REACTION_WAITING);
+            try {
+              const warning = addToPack(session, media);
+              await reply(sock, jid, warning || `Sticker agregado al paquete *${session.name}* (${session.items.length}).`, message);
+            } finally {
+              await react(sock, message, REACTION_DONE);
+            }
+          } catch (error) {
+            console.error('Error agregando medio al paquete:', error);
+          }
+        }
+      }
+    });
   };
 
   start();
 }
+
+process.on('unhandledRejection', (reason) => {
+  console.error('Error no controlado:', reason?.message || reason);
+});
 
 process.once('SIGINT', () => {
   console.log('\nCerrando bot…');
