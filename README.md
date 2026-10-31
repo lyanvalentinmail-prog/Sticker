@@ -26,7 +26,7 @@ npm start
 En la primera ejecución, el bot pregunta `qr` o `code` (también acepta `1` o `2`):
 
 - **qr**: muestra un QR en la terminal. Escanéalo desde WhatsApp > Dispositivos vinculados > Vincular dispositivo.
-- **code**: escribe el número completo con código de país, solo dígitos (por ejemplo, `59899123456`). El bot espera a que el WebSocket esté abierto, pide el pairing code como en Pain-Bot y lo muestra agrupado `ABCD-EFGH`. Introduce el código recién generado desde WhatsApp > Dispositivos vinculados > Vincular dispositivo > Vincular con número de teléfono.
+- **code**: escribe el número completo con código de país, solo dígitos (por ejemplo, `59899123456`). El bot consulta la versión actual de WhatsApp Web, espera a que el WebSocket esté abierto, pide el pairing code como en Pain-Bot y lo muestra agrupado `ABCD-EFGH`. Introduce el código recién generado desde WhatsApp > Dispositivos vinculados > Vincular dispositivo > Vincular con número de teléfono.
 
 La sesión queda guardada en `auth_info/`; si ya está vinculada, `npm start` se conecta directamente sin volver a preguntar. No escanees el QR si elegiste `code` y no reutilices códigos anteriores. En una terminal no interactiva puedes omitir el menú con `PAIRING_NUMBER=59899123456 npm start`, sustituyendo el ejemplo por tu número real. Si el bot detecta credenciales incompletas y no vinculadas (`registered=false`), borra automáticamente esos archivos y vuelve a iniciar el flujo. Si WhatsApp revoca la sesión (`loggedOut`), también elimina las credenciales y reinicia el vínculo. Las sesiones vinculadas y vigentes no se borran. Si vas a cambiar una cuenta ya vinculada, desconéctala en WhatsApp y elimina `auth_info/`.
 

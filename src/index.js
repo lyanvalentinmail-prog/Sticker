@@ -1,6 +1,7 @@
 import makeWASocket, {
   Browsers,
   DisconnectReason,
+  fetchLatestBaileysVersion,
   downloadMediaMessage,
   useMultiFileAuthState,
 } from '@whiskeysockets/baileys';
@@ -285,7 +286,7 @@ async function getIncomingMediaFromQuote(message) {
 }
 
 function normalizePhoneNumber(value) {
-  return String(value || '').replace(/\D/g, '');
+  return String(value || '').replace(/\D/g, '').replace(/^0+/, '');
 }
 
 async function chooseLinkingMethod(isRegistered) {
@@ -317,7 +318,7 @@ async function chooseLinkingMethod(isRegistered) {
           const rawNumber = await prompt.question('Número con código de país (solo dígitos, ej. 59899123456): ');
           const phoneNumber = normalizePhoneNumber(rawNumber);
           if (/^[1-9]\d{7,14}$/.test(phoneNumber)) return { method: 'pairing-code', phoneNumber };
-          console.log('Número no válido. Usa de 8 a 15 dígitos, incluye el código de país y no pongas 00 al inicio.');
+          console.log('Número no válido. Usa de 8 a 15 dígitos e incluye el código de país (por ejemplo 598); si escribes 00 al inicio, se quitará automáticamente.');
         }
       }
       console.log('Opción no válida; escribe qr o code.');
@@ -327,7 +328,7 @@ async function chooseLinkingMethod(isRegistered) {
   }
 }
 
-async function main(linkingOverride) {
+async function main(linkingOverride, versionOverride) {
   await mkdir(AUTH_DIR, { recursive: true });
   let auth = await useMultiFileAuthState(AUTH_DIR);
   const authFiles = await readdir(AUTH_DIR);
@@ -340,10 +341,21 @@ async function main(linkingOverride) {
   }
   const { state, saveCreds } = auth;
   const linking = linkingOverride || await chooseLinkingMethod(state.creds.registered);
+  let webVersion = versionOverride;
+  if (!webVersion) {
+    try {
+      const latest = await fetchLatestBaileysVersion();
+      webVersion = latest.version;
+      console.log(`Baileys usará WhatsApp Web ${webVersion.join('.')}.`);
+    } catch (error) {
+      console.warn(`No pude consultar la versión actual de WhatsApp Web (${error.message}); usaré la versión incluida en Baileys.`);
+    }
+  }
   const sock = makeWASocket({
+    ...(webVersion ? { version: webVersion } : {}),
     auth: state,
     logger,
-    browser: Browsers.ubuntu('Sticker Bot'),
+    browser: Browsers.ubuntu('Chrome'),
     printQRInTerminal: false,
     markOnlineOnConnect: false,
     syncFullHistory: false,
@@ -395,7 +407,7 @@ async function main(linkingOverride) {
           await main();
         })().catch(console.error);
       } else {
-        main(linking).catch(console.error);
+        main(linking, webVersion).catch(console.error);
       }
     }
   });
