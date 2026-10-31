@@ -9,7 +9,7 @@ import WebP from 'node-webpmux';
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { createInterface } from 'node:readline/promises';
@@ -328,7 +328,16 @@ async function chooseLinkingMethod(isRegistered) {
 
 async function main(linkingOverride) {
   await mkdir(AUTH_DIR, { recursive: true });
-  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+  let auth = await useMultiFileAuthState(AUTH_DIR);
+  const authFiles = await readdir(AUTH_DIR);
+  if (!auth.state.creds.registered && authFiles.length > 0) {
+    // Remove partial pairing keys/creds left by a failed or interrupted, unregistered link attempt.
+    await rm(AUTH_DIR, { recursive: true, force: true });
+    await mkdir(AUTH_DIR, { recursive: true });
+    auth = await useMultiFileAuthState(AUTH_DIR);
+    console.log(`Se detectó una sesión incompleta en ${AUTH_DIR}; se limpió automáticamente porque WhatsApp aún no está vinculado.`);
+  }
+  const { state, saveCreds } = auth;
   const linking = linkingOverride || await chooseLinkingMethod(state.creds.registered);
   const sock = makeWASocket({
     auth: state,
@@ -345,18 +354,22 @@ async function main(linkingOverride) {
     if (pairingCodeRequested || linking.method !== 'pairing-code' || state.creds.registered) return;
     pairingCodeRequested = true;
     for (let attempt = 1; attempt <= 5; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, attempt === 1 ? 3000 : 2000));
       if (connectionClosed) return;
       try {
+        console.log('Esperando a que WhatsApp abra la conexión segura…');
+        await sock.waitForSocketOpen();
+        if (connectionClosed) return;
         const code = await sock.requestPairingCode(linking.phoneNumber);
-        console.log(`\nCódigo de vinculación: ${code}\nEn WhatsApp: Dispositivos vinculados > Vincular dispositivo > Vincular con número de teléfono.`);
+        console.log(`\nTu pairing code es: ${code}\nEn WhatsApp: Dispositivos vinculados > Vincular dispositivo > Vincular con número de teléfono.`);
         return;
       } catch (error) {
+        if (connectionClosed) return;
         if (attempt === 5) {
           console.error(`No se pudo generar el pairing code: ${error.message}`);
           console.error('Comprueba el número con código de país y la conexión. Cierra y vuelve a ejecutar npm start para intentarlo otra vez.');
         } else {
-          console.log(`Esperando conexión para pedir el código… (${attempt}/5)`);
+          console.log(`Falló el intento ${attempt}/5; volveré a pedir el código cuando se recupere la conexión.`);
+          await new Promise((resolve) => setTimeout(resolve, 2000));
         }
       }
     }
@@ -365,7 +378,8 @@ async function main(linkingOverride) {
     if (qr && linking.method === 'qr') {
       console.log('\nEscanea el QR con WhatsApp > Dispositivos vinculados > Vincular dispositivo.');
     }
-    if (connection === 'connecting' && linking.method === 'pairing-code') {
+    // Baileys emits the QR update after the pairing handshake is ready.
+    if (qr && linking.method === 'pairing-code') {
       void requestPairingCode();
     }
     if (connection === 'open') console.log('WhatsApp conectado. Envía .help para ver los comandos.');
@@ -376,10 +390,6 @@ async function main(linkingOverride) {
       else console.log(`Sesión cerrada. Borra ${AUTH_DIR} para vincular de nuevo.`);
     }
   });
-  if (linking.method === 'pairing-code' && !state.creds.registered) {
-    // Also schedule a fallback in case the initial "connecting" event fired before listeners attached.
-    void requestPairingCode();
-  }
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
     for (const message of messages) {
