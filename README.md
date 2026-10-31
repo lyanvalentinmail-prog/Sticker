@@ -33,16 +33,20 @@ La sesión queda guardada en `auth_info/`; si ya está vinculada (por QR o por c
 ## Comandos
 
 - `.pack nombre.autor` — crea un paquete (nombre y autor separados por el último punto).
-- `.pack add` — activa la captura; luego envía imágenes una por una. También puedes responder a una imagen con `.pack add` para agregarla directamente.
-- `.pack done` — convierte y envía todos los elementos acumulados como stickers.
+- `.pack add` — activa la captura; luego envía imágenes o videos uno por uno (máximo 30). También puedes responder a una imagen o video con `.pack add` para agregarlo directamente.
+- `.pack done` — convierte y envía todos los elementos acumulados como stickers, y confirma cuántos se enviaron.
 - `.pack cancel` — descarta el paquete en curso.
-- `.sticker` — convierte una imagen (o un sticker) a sticker. Puede acompañar una imagen o responder a ella.
+- `.sticker` — convierte una imagen, un video (primer fotograma) o un sticker a sticker. Puede acompañar el archivo o responder a él, incluso si el comando va como texto de la imagen.
 - `.sticker texto` — busca y envía un sticker para esa búsqueda.
 - `.toimg` — responde a un sticker para convertirlo a PNG.
 - `.tovid` — responde a un sticker animado para convertirlo a MP4 (requiere `ffmpeg`).
 - `.ssearch texto` — busca un sticker y envía el primer resultado.
 - `.spack texto` — busca y envía hasta ocho resultados relacionados como un lote de stickers.
-- `.help` — muestra la ayuda.
+- `.help` / `.menu` — muestra la ayuda.
+
+El bot reacciona a cada comando: 🕘 mientras lo procesa y ⭐️ cuando termina. La misma reacción se actualiza al finalizar, así que no quedan relojes colgados si algo falla.
+
+Los comandos se reconocen sin distinguir mayúsculas y funcionan también como texto de una imagen, en chats individuales y en grupos; el bot ignora sus propios mensajes y los estados.
 
 `.pack done` envía los stickers en secuencia usando Baileys y adjunta a cada uno los metadatos EXIF del mismo pack (nombre, autor e identificador), para que WhatsApp los reconozca como pertenecientes a ese conjunto. WhatsApp no ofrece un método de Baileys para enviar un paquete entero en un solo mensaje; el bot envía los stickers individualmente. `.spack` también agrupa los metadatos de los resultados encontrados.
 
