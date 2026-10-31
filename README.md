@@ -26,9 +26,9 @@ npm start
 En la primera ejecución, el bot pregunta `qr` o `code` (también acepta `1` o `2`):
 
 - **qr**: muestra un QR en la terminal. Escanéalo desde WhatsApp > Dispositivos vinculados > Vincular dispositivo.
-- **code**: escribe el número completo con código de país, solo dígitos (por ejemplo, `59899123456`). El bot consulta la versión actual de WhatsApp Web, espera a que el WebSocket esté abierto, pide el pairing code como en Pain-Bot y lo muestra agrupado `ABCD-EFGH`. Introduce el código recién generado desde WhatsApp > Dispositivos vinculados > Vincular dispositivo > Vincular con número de teléfono.
+- **code**: escribe el número completo con código de país, solo dígitos (por ejemplo, `59899123456`). El bot consulta la versión actual de WhatsApp Web, espera a que termine el handshake con WhatsApp y solo entonces pide el pairing code, que muestra agrupado como `ABCD-EFGH` (el guion es solo para leerlo). Introduce el código recién generado desde WhatsApp > Dispositivos vinculados > Vincular dispositivo > Vincular con número de teléfono. El código caduca: si tarda demasiado, el bot genera uno nuevo automáticamente y lo muestra en pantalla (solo sirve el último). Tras cinco intentos fallidos se detiene con un mensaje explicando el motivo; puedes ampliar el límite con `LINK_ATTEMPTS=10`.
 
-La sesión queda guardada en `auth_info/`; si ya está vinculada, `npm start` se conecta directamente sin volver a preguntar. No escanees el QR si elegiste `code` y no reutilices códigos anteriores. En una terminal no interactiva puedes omitir el menú con `PAIRING_NUMBER=59899123456 npm start`, sustituyendo el ejemplo por tu número real. Si el bot detecta credenciales incompletas y no vinculadas (`registered=false`), borra automáticamente esos archivos y vuelve a iniciar el flujo. Si WhatsApp revoca la sesión (`loggedOut`), también elimina las credenciales y reinicia el vínculo. Las sesiones vinculadas y vigentes no se borran. Si vas a cambiar una cuenta ya vinculada, desconéctala en WhatsApp y elimina `auth_info/`.
+La sesión queda guardada en `auth_info/`; si ya está vinculada (por QR o por código), `npm start` se conecta directamente sin volver a preguntar. No escanees el QR si elegiste `code` y no reutilices códigos anteriores. En una terminal no interactiva puedes omitir el menú con `PAIRING_NUMBER=59899123456 npm start`, sustituyendo el ejemplo por tu número real. Si el bot detecta credenciales de un vínculo que quedó a medias, las descarta y empieza de cero: reutilizarlas hace que WhatsApp rechace el emparejamiento. Las sesiones ya vinculadas nunca se borran; si WhatsApp revoca la sesión (`loggedOut` o `401`), se eliminan las credenciales y se reinicia el vínculo automáticamente. Si vas a cambiar una cuenta ya vinculada, desconéctala en WhatsApp y elimina `auth_info/`.
 
 ## Comandos
 
@@ -68,5 +68,8 @@ Sin la clave, las demás funciones (crear, convertir y enviar stickers) siguen d
 - `auth_info/` contiene las credenciales de WhatsApp. No la publiques ni la compartas.
 - Para vincular otra cuenta, desconecta el dispositivo desde WhatsApp y elimina `auth_info/` antes de reiniciar.
 - Si `.tovid` informa que falta ffmpeg: `pkg install ffmpeg`.
+- Si el pairing code no aparece: comprueba que el número incluya el código de país (sin `+` ni `00`) y que la terminal no esté cerrando la conexión. El bot reintenta solo y muestra el motivo de cada cierre.
+- Si WhatsApp dice que el código no es válido, espera al que se muestra tras el mensaje `La vinculación no se completó…`; los códigos anteriores dejan de servir en cuanto se genera uno nuevo.
+- Si el vínculo se queda colgado, elimina `auth_info/` y ejecuta `npm start` otra vez.
 - Las imágenes de un paquete se mantienen temporalmente en memoria mientras el proceso está activo; un reinicio cancela el paquete pendiente.
 - Requiere Node.js 20.9 o superior. En Termux, utiliza `nodejs-lts`.

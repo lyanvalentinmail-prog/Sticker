@@ -289,13 +289,23 @@ function normalizePhoneNumber(value) {
   return String(value || '').replace(/\D/g, '').replace(/^0+/, '');
 }
 
-async function chooseLinkingMethod(isRegistered) {
-  if (isRegistered) return { method: 'saved-session' };
+const isValidPhoneNumber = (value) => /^[1-9]\d{7,14}$/.test(value);
+
+// `registered` alone is not enough: linking through the pairing code sets it, but
+// QR linking sometimes only stores the device identity (`me` + `account`).
+const hasLinkedSession = (creds) => Boolean(
+  creds?.registered || (creds?.me?.id && creds?.account?.details),
+);
+
+const delay = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
+
+async function chooseLinkingMethod(alreadyLinked) {
+  if (alreadyLinked) return { method: 'saved-session' };
 
   const envNumber = normalizePhoneNumber(process.env.PAIRING_NUMBER);
   if (envNumber) {
-    if (!/^[1-9]\d{7,14}$/.test(envNumber)) {
-      throw new Error('PAIRING_NUMBER debe incluir código de país y tener entre 8 y 15 dígitos.');
+    if (!isValidPhoneNumber(envNumber)) {
+      throw new Error('PAIRING_NUMBER debe incluir el código de país y tener entre 8 y 15 dígitos (solo números).');
     }
     return { method: 'pairing-code', phoneNumber: envNumber };
   }
@@ -317,7 +327,7 @@ async function chooseLinkingMethod(isRegistered) {
         while (true) {
           const rawNumber = await prompt.question('Número con código de país (solo dígitos, ej. 59899123456): ');
           const phoneNumber = normalizePhoneNumber(rawNumber);
-          if (/^[1-9]\d{7,14}$/.test(phoneNumber)) return { method: 'pairing-code', phoneNumber };
+          if (isValidPhoneNumber(phoneNumber)) return { method: 'pairing-code', phoneNumber };
           console.log('Número no válido. Usa de 8 a 15 dígitos e incluye el código de país (por ejemplo 598); si escribes 00 al inicio, se quitará automáticamente.');
         }
       }
@@ -328,123 +338,243 @@ async function chooseLinkingMethod(isRegistered) {
   }
 }
 
-async function main(linkingOverride, versionOverride) {
-  await mkdir(AUTH_DIR, { recursive: true });
-  let auth = await useMultiFileAuthState(AUTH_DIR);
-  const authFiles = await readdir(AUTH_DIR);
-  if (!auth.state.creds.registered && authFiles.length > 0) {
-    // Remove partial pairing keys/creds left by a failed or interrupted, unregistered link attempt.
-    await rm(AUTH_DIR, { recursive: true, force: true });
-    await mkdir(AUTH_DIR, { recursive: true });
-    auth = await useMultiFileAuthState(AUTH_DIR);
-    console.log(`Se detectó una sesión incompleta en ${AUTH_DIR}; se limpió automáticamente porque WhatsApp aún no está vinculado.`);
+async function fetchWebVersion() {
+  try {
+    const { version } = await fetchLatestBaileysVersion();
+    if (!Array.isArray(version) || version.length !== 3) throw new Error('versión inválida');
+    console.log(`Baileys usará WhatsApp Web ${version.join('.')}.`);
+    return version;
+  } catch (error) {
+    console.warn(`No pude consultar la versión actual de WhatsApp Web (${error.message}); usaré la versión incluida en Baileys.`);
+    return undefined;
   }
-  const { state, saveCreds } = auth;
-  const linking = linkingOverride || await chooseLinkingMethod(state.creds.registered);
-  let webVersion = versionOverride;
-  if (!webVersion) {
-    try {
-      const latest = await fetchLatestBaileysVersion();
-      webVersion = latest.version;
-      console.log(`Baileys usará WhatsApp Web ${webVersion.join('.')}.`);
-    } catch (error) {
-      console.warn(`No pude consultar la versión actual de WhatsApp Web (${error.message}); usaré la versión incluida en Baileys.`);
-    }
-  }
-  const sock = makeWASocket({
-    ...(webVersion ? { version: webVersion } : {}),
-    auth: state,
-    logger,
-    browser: Browsers.ubuntu('Chrome'),
-    printQRInTerminal: false,
-    markOnlineOnConnect: false,
-    syncFullHistory: false,
-  });
-  sock.ev.on('creds.update', saveCreds);
-  let pairingCodeRequested = false;
-  let connectionClosed = false;
-  const requestPairingCode = async () => {
-    if (pairingCodeRequested || linking.method !== 'pairing-code' || state.creds.registered) return;
-    pairingCodeRequested = true;
-    for (let attempt = 1; attempt <= 5; attempt += 1) {
-      if (connectionClosed) return;
-      try {
-        if (!sock.ws?.isOpen) await sock.waitForSocketOpen();
-        if (!sock.ws?.isOpen) throw new Error('El WebSocket todavía no está abierto.');
-        const code = await sock.requestPairingCode(linking.phoneNumber);
-        if (!/^[A-Z0-9]{8}$/.test(code)) {
-          throw new Error(`Baileys devolvió un código inesperado (${String(code)}).`);
-        }
-        const formattedCode = `${code.slice(0, 4)}-${code.slice(4)}`;
-        console.log(`\nTu pairing code es: ${formattedCode}\nEn WhatsApp: Dispositivos vinculados > Vincular dispositivo > Vincular con número de teléfono. Escríbelo enseguida tal como aparece.`);
-        return;
-      } catch (error) {
-        if (connectionClosed) return;
-        if (attempt === 5) {
-          console.error(`No se pudo generar el pairing code: ${error.message}`);
-          console.error('Comprueba el número con código de país y la conexión. Cierra y vuelve a ejecutar npm start para intentarlo otra vez.');
-        } else {
-          console.log(`Falló el intento ${attempt}/5; volveré a pedir el código cuando se recupere la conexión.`);
-          await new Promise((resolve) => setTimeout(resolve, 2000));
-        }
-      }
-    }
-  };
-  sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
-    if (qr && linking.method === 'qr') {
-      console.log('\nEscanea el QR con WhatsApp > Dispositivos vinculados > Vincular dispositivo.');
-      qrcode.generate(qr, { small: true });
-    }
-    if (connection === 'open') console.log('WhatsApp conectado. Envía .help para ver los comandos.');
-    if (connection === 'close') {
-      connectionClosed = true;
-      const code = lastDisconnect?.error?.output?.statusCode;
-      if (code === DisconnectReason.loggedOut) {
-        console.log(`WhatsApp indica que esta sesión ya no está vinculada. Eliminando credenciales de ${AUTH_DIR} y reiniciando el vínculo…`);
-        void (async () => {
-          await rm(AUTH_DIR, { recursive: true, force: true });
-          await mkdir(AUTH_DIR, { recursive: true });
-          await main();
-        })().catch(console.error);
-      } else {
-        main(linking, webVersion).catch(console.error);
-      }
-    }
-  });
-  // Baileys recommends requesting the code immediately after creating the socket.
-  if (linking.method === 'pairing-code' && !state.creds.registered) {
-    void requestPairingCode();
-  }
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
-    for (const message of messages) {
-      if (!message.message || message.key.fromMe || message.key.remoteJid === 'status@broadcast') continue;
-      const jid = message.key.remoteJid;
-      const sender = message.key.participant || jid;
-      const key = `${jid}:${sender}`;
-      const text = getMessageText(message).trim();
-      const match = text.match(/^\.(pack|sticker|toimg|tovid|ssearch|spack|help|menu)\b\s*(.*)$/is);
-      const session = packSessions.get(key);
-
-      try {
-        if (match) {
-          await handleCommand(sock, message, `.${match[1].toLowerCase()}`, match[2].trim().split(/\s+/).filter(Boolean), key, jid);
-          continue;
-        }
-        if (session?.capturing) {
-          const media = await getIncomingMedia(message);
-          if (media && ['imageMessage', 'stickerMessage'].includes(media.type)) {
-            session.items.push(media.buffer);
-            await reply(sock, jid, `Sticker agregado al paquete *${session.name}* (${session.items.length}).`, message);
-          }
-        }
-      } catch (error) {
-        console.error('Error procesando mensaje:', error);
-        await reply(sock, jid, `No pude completar el comando: ${error.message || 'error inesperado'}`, message);
-      }
-    }
-  });
-  process.once('SIGINT', () => { console.log('Cerrando bot…'); process.exit(0); });
 }
 
-main().catch((error) => { console.error('No se pudo iniciar el bot:', error); process.exit(1); });
+async function loadAuthState({ reset = false } = {}) {
+  await mkdir(AUTH_DIR, { recursive: true });
+  if (reset) {
+    await rm(AUTH_DIR, { recursive: true, force: true });
+    await mkdir(AUTH_DIR, { recursive: true });
+  }
+  const auth = await useMultiFileAuthState(AUTH_DIR);
+  if (hasLinkedSession(auth.state.creds)) return auth;
+
+  const files = await readdir(AUTH_DIR);
+  if (!files.length) return auth;
+  // Keys left behind by an interrupted pairing attempt make WhatsApp reject the
+  // next link (the stored identity no longer matches what the server expects).
+  await rm(AUTH_DIR, { recursive: true, force: true });
+  await mkdir(AUTH_DIR, { recursive: true });
+  console.log(`Se descartó una vinculación incompleta en ${AUTH_DIR}.`);
+  return useMultiFileAuthState(AUTH_DIR);
+}
+
+function describeDisconnect(statusCode) {
+  switch (statusCode) {
+    case DisconnectReason.restartRequired:
+      return 'WhatsApp pidió reiniciar la conexión';
+    case DisconnectReason.connectionClosed:
+      return 'la conexión se cerró';
+    case 408:
+      return 'la conexión expiró';
+    case DisconnectReason.connectionReplaced:
+      return 'la sesión se abrió en otro dispositivo';
+    case DisconnectReason.loggedOut:
+      return 'la sesión ya no está vinculada';
+    case DisconnectReason.forbidden:
+      return 'WhatsApp rechazó la conexión (403)';
+    case DisconnectReason.unavailableService:
+      return 'el servicio de WhatsApp no está disponible';
+    default:
+      return statusCode ? `código ${statusCode}` : 'motivo desconocido';
+  }
+}
+
+const MAX_PAIRING_ATTEMPTS = Math.max(1, Number.parseInt(process.env.LINK_ATTEMPTS || '', 10) || 5);
+const MAX_RECONNECT_FAILURES = 10;
+// If WhatsApp never sends a QR while linking (it normally does right after the
+// registration handshake), request the code anyway once the socket is settled.
+const PAIRING_CODE_FALLBACK_MS = 20000;
+
+function printPairingInstructions(code, attempt) {
+  const attemptLabel = attempt > 1 ? ` (intento ${attempt}/${MAX_PAIRING_ATTEMPTS})` : '';
+  console.log('');
+  console.log('══════════════════════════════════');
+  console.log(`  Pairing code${attemptLabel}: ${code}`);
+  console.log('══════════════════════════════════');
+  console.log('En WhatsApp: Dispositivos vinculados > Vincular dispositivo >');
+  console.log('Vincular con número de teléfono, y escribe el código de 8 caracteres');
+  console.log('(el guion es solo para leerlo). Introdúcelo enseguida: si expira,');
+  console.log('se generará un código nuevo automáticamente.');
+  console.log('');
+}
+
+async function main({ linking: initialLinking, version: versionOverride } = {}) {
+  let auth = await loadAuthState();
+  let linking = initialLinking || await chooseLinkingMethod(hasLinkedSession(auth.state.creds));
+  const webVersion = versionOverride || await fetchWebVersion();
+
+  let pairingAttempts = 0;
+  let reconnectFailures = 0;
+  let sessionResets = 0;
+
+  const start = () => {
+    const { state, saveCreds } = auth;
+    const sock = makeWASocket({
+      ...(webVersion ? { version: webVersion } : {}),
+      auth: state,
+      logger,
+      browser: Browsers.ubuntu('Chrome'),
+      markOnlineOnConnect: false,
+      syncFullHistory: false,
+      // Keep the socket (and therefore the pairing code) alive long enough to
+      // type it instead of letting the QR refs expire after ~20 seconds.
+      qrTimeout: 60000,
+    });
+
+    sock.ev.on('creds.update', saveCreds);
+
+    let finished = false;
+    let pairingAttempted = false;
+    let fallbackTimer = null;
+
+    const requestPairingCode = async () => {
+      // Baileys can only send this IQ once the Noise handshake is complete, which
+      // is signalled by the first `qr` update. Requesting it earlier makes
+      // WhatsApp drop the connection (428/401) and no code ever shows up.
+      if (finished || pairingAttempted) return;
+      if (linking.method !== 'pairing-code' || hasLinkedSession(state.creds)) return;
+      pairingAttempted = true;
+      pairingAttempts += 1;
+      if (pairingAttempts > MAX_PAIRING_ATTEMPTS) {
+        console.error(`\nSe agotaron los ${MAX_PAIRING_ATTEMPTS} intentos de vinculación con código.`);
+        console.error('Verifica que el número incluya el código de país correcto (ej. 59899123456)');
+        console.error('y que la cuenta de WhatsApp esté activa y actualizada.');
+        console.error('Puedes intentarlo otra vez con npm start o ampliar el límite con LINK_ATTEMPTS=10.');
+        process.exit(1);
+      }
+      try {
+        const code = String(await sock.requestPairingCode(linking.phoneNumber) || '');
+        if (!/^[A-Z0-9]{8}$/.test(code)) {
+          throw new Error(`Baileys devolvió un código inesperado (${code || 'vacío'}).`);
+        }
+        console.log(`\nPairing code solicitado para el número ${linking.phoneNumber}.`);
+        printPairingInstructions(`${code.slice(0, 4)}-${code.slice(4)}`, pairingAttempts);
+      } catch (error) {
+        if (finished) return;
+        console.error(`No se pudo generar el pairing code: ${error.message}`);
+        console.error('Se reiniciará la conexión para volver a intentarlo.');
+        void sock.end(error);
+      }
+    };
+
+    if (linking.method === 'pairing-code' && !hasLinkedSession(state.creds)) {
+      fallbackTimer = setTimeout(() => { void requestPairingCode(); }, PAIRING_CODE_FALLBACK_MS);
+    }
+
+    const handleClose = async (lastDisconnect, attemptedPairing) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(fallbackTimer);
+
+      const status = lastDisconnect?.error?.output?.statusCode;
+      const reason = describeDisconnect(status);
+      const stillLinked = hasLinkedSession(state.creds);
+      await Promise.resolve(saveCreds()).catch(() => {});
+
+      if (status === DisconnectReason.loggedOut || status === DisconnectReason.forbidden || status === 419) {
+        sessionResets += 1;
+        console.log(stillLinked
+          ? `\nWhatsApp cerró la sesión (${reason}).`
+          : `\nWhatsApp rechazó la vinculación (${reason}). Revisa que el número sea correcto.`);
+        if (sessionResets > 3) {
+          console.error('La sesión se rechazó varias veces seguidas. Revisa el número y la cuenta,');
+          console.error(`o elimina ${AUTH_DIR} y vuelve a ejecutar npm start.`);
+          process.exit(1);
+        }
+        console.log(`Se eliminarán las credenciales de ${AUTH_DIR} y se iniciará un vínculo nuevo.`);
+        auth = await loadAuthState({ reset: true });
+        if (linking.method === 'saved-session') {
+          linking = await chooseLinkingMethod(false);
+        }
+        reconnectFailures = 0;
+        console.log(linking.method === 'pairing-code'
+          ? `Se pedirá un pairing code nuevo para ${linking.phoneNumber}.`
+          : 'Se mostrará un QR nuevo.');
+        start();
+        return;
+      }
+
+      if (stillLinked) {
+        reconnectFailures += 1;
+        if (reconnectFailures > MAX_RECONNECT_FAILURES) {
+          console.error(`\nNo se pudo mantener la conexión con WhatsApp (${reason}).`);
+          console.error('Revisa tu conexión a internet y vuelve a ejecutar npm start.');
+          process.exit(1);
+        }
+        const wait = Math.min(1000 * reconnectFailures, 10000);
+        console.log(`Conexión cerrada (${reason}). Reconectando en ${Math.round(wait / 1000)} s…`);
+        await delay(wait);
+        start();
+        return;
+      }
+
+      reconnectFailures += 1;
+      if (reconnectFailures > MAX_RECONNECT_FAILURES) {
+        console.error(`\nNo se pudo abrir la conexión con WhatsApp tras ${MAX_RECONNECT_FAILURES} intentos (${reason}).`);
+        console.error('Revisa tu conexión a internet y vuelve a ejecutar npm start.');
+        process.exit(1);
+      }
+
+      if (attemptedPairing) {
+        console.log(`\nLa vinculación no se completó (${reason}).`);
+        console.log('Se generará un pairing code nuevo en unos segundos…');
+        await delay(1500);
+        auth = await loadAuthState({ reset: true });
+      } else {
+        console.log(`Conexión cerrada (${reason}). Reintentando…`);
+        await delay(Math.min(1000 * reconnectFailures, 5000));
+      }
+      start();
+    };
+
+    sock.ev.on('connection.update', (update) => {
+      const { connection, lastDisconnect, qr } = update;
+
+      if (qr) {
+        if (hasLinkedSession(state.creds)) return;
+        if (linking.method === 'pairing-code') {
+          // The handshake is done at this point: safe to ask for the code.
+          void requestPairingCode();
+        } else if (linking.method === 'qr') {
+          console.log('\nEscanea este QR con WhatsApp > Dispositivos vinculados > Vincular dispositivo.');
+          qrcode.generate(qr, { small: true });
+        }
+      }
+
+      if (connection === 'open') {
+        reconnectFailures = 0;
+        pairingAttempts = 0;
+        sessionResets = 0;
+        clearTimeout(fallbackTimer);
+        console.log('WhatsApp conectado. Envía .help para ver los comandos.');
+      }
+
+      if (connection === 'close') {
+        void handleClose(lastDisconnect, pairingAttempted);
+      }
+    });
+  };
+
+  start();
+}
+
+process.once('SIGINT', () => {
+  console.log('\nCerrando bot…');
+  process.exit(0);
+});
+
+main().catch((error) => {
+  console.error('No se pudo iniciar el bot:', error.message || error);
+  process.exit(1);
+});
