@@ -26,7 +26,7 @@ En la primera ejecución, el bot pregunta qué método usar:
 1. **QR**: escanea el código desde WhatsApp > Dispositivos vinculados > Vincular dispositivo.
 2. **Pairing code**: escribe el número completo con código de país, solo dígitos (por ejemplo, `59899123456`). Espera a que Termux muestre el código y escríbelo en WhatsApp > Dispositivos vinculados > Vincular dispositivo > Vincular con número de teléfono.
 
-La sesión queda guardada en `auth_info/`; si ya está vinculada, `npm start` se conecta directamente sin volver a preguntar. En una terminal no interactiva puedes omitir el menú y usar `PAIRING_NUMBER=59899123456 npm start`, sustituyendo el ejemplo por tu número real. Si vas a cambiar de método o cuenta, primero desconecta la sesión existente en WhatsApp y elimina `auth_info/`.
+La sesión queda guardada en `auth_info/`; si ya está vinculada, `npm start` se conecta directamente sin volver a preguntar. El pairing code se solicita cuando el WebSocket seguro de WhatsApp está abierto para evitar códigos inválidos. En una terminal no interactiva puedes omitir el menú y usar `PAIRING_NUMBER=59899123456 npm start`, sustituyendo el ejemplo por tu número real. Si el bot detecta credenciales incompletas y no vinculadas (`registered=false`), borra automáticamente esos archivos y vuelve a iniciar el flujo. Las sesiones vinculadas no se borran automáticamente. Si vas a cambiar una cuenta ya vinculada, desconéctala en WhatsApp y elimina `auth_info/`.
 
 ## Comandos
 
