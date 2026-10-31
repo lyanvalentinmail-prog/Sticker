@@ -1,0 +1,18 @@
+{
+  "name": "termux-sticker-bot",
+  "version": "1.0.0",
+  "description": "Bot de WhatsApp para crear y administrar stickers, compatible con Termux.",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "engines": {
+    "node": ">=20.9.0"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.18",
+    "node-webpmux": "^3.2.1",
+    "pino": "^9.6.0"
+  }
+}
